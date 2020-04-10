@@ -19,7 +19,36 @@ ggplot(as.data.frame(logOdds_dem2012),
 
 
 ```{r}
-data.frame(x = logOdds_dem2016 - logOdds_dem2012) %>%
-  ggplot(aes(x)) + geom_histogram()
+setwd("/Users/dougl/OneDrive/Documents/6. GitHub/STAT-482-DASH")
+load(file = "data.RData")
+
+election_data <- election_data %>% 
+  mutate(id = seq(1, 852))
+
+locs <- locs %>%
+  mutate(id = seq(1, 852))
+
+dat <- dplyr::full_join(election_data, locs, by = "id")
+```
+
+```{r}
+ggplot(data.frame(x = logOdds_dem2016 - logOdds_dem2012)) + geom_histogram(aes(x))
+```
+```{r}
+dat %>% 
+  ggplot(aes(y)) +
+  geom_histogram()
+```
+
+
+
+```{r, fig.asp=1}
+dat %>% ggplot(aes(x = y, y = ..density..)) +
+  #geom_histogram() +
+  facet_wrap(~State) + 
+  theme(legend.position = "none") + 
+  geom_density(aes(color = State, fill = State), alpha = 0.2) +
+  geom_rug(aes(y=0), position = position_jitter(height = 0)) +
+  ylab("Density") + xlab("Odds Ratio")
 ```
 
