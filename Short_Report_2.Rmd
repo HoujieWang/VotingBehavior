@@ -1,0 +1,25 @@
+```{r}
+library(tidyverse); require(cowplot)
+theme_set(theme_cowplot())
+```
+
+
+```{r}
+ggplot(as.data.frame(logOdds_dem2016), 
+       aes(x = logOdds_dem2016)) + 
+  geom_histogram()
+```
+
+
+```{r}
+ggplot(as.data.frame(logOdds_dem2012), 
+       aes(x = logOdds_dem2012)) + 
+  geom_histogram()
+```
+
+
+```{r}
+data.frame(x = logOdds_dem2016 - logOdds_dem2012) %>%
+  ggplot(aes(x)) + geom_histogram()
+```
+
