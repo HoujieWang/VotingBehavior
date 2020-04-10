@@ -1,0 +1,177 @@
+---
+title: "STAT482_election"
+author: "Sang Chan Lee"
+date: "4/7/2020"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE}
+library(glmnet)
+library(caret)
+library(BART)
+library(stats)
+```
+
+
+# Uploading the data 
+```{r}
+{
+  setwd("/Users/sangchanlee/Downloads/election_combined")
+  sang_election = read.csv(file = "election_couty_cleaned.csv")
+  load(file = "full_data.Rdata")
+}
+
+```
+
+
+# Data processing and variable selection using Lasso Regression
+
+```{r}
+# full_data: 2016 - 2012 
+full_data = full_data[-632,]
+sang_election= sang_election[-623,]
+
+# matching to common county 
+m1 = (which(full_data[,3] %in% sang_election[,4]))
+data_feature_meatch = full_data[m1,]
+
+m2 = (which(sang_election[,4] %in% full_data[,3]))
+data_response_match = sang_election[m2,]
+data_response_match = sang_election[-729,]
+
+# extracting response for common county 
+data_response_match = data.frame(data_response_match[,3:4] ,data_response_match[,59:74])
+
+# log odds 
+logOdds_dem2016 = log(data_response_match$pct_dem_16/(1-data_response_match$pct_dem_16))
+logOdds_dem2012 = log(data_response_match$pct_dem_12/(1-data_response_match$pct_dem_12))
+
+y = logOdds_dem2016 - logOdds_dem2012
+y = scale(y)
+
+# y = abs(data_response_match$Demvotes16 - data_response_match$Demvotes12)
+# y = scale(y)
+
+X = data_feature_meatch[,-1:-4]
+X = apply(X, 2, scale)
+
+# set.seed(101)
+# cv_lasso = cv.glmnet(X, y)
+# lasso_coef = coef(cv_lasso, s = "lambda.min")
+# lasso_vs = X[,-which(lasso_coef[-1,1]==0)]
+
+# Lasso Regression for variable selection 
+set.seed(101)
+fit.lasso = cv.glmnet(x = as.matrix(X), y = y, family = "gaussian")
+coef_lasso = coef(fit.lasso, s = "lambda.min")
+
+
+# removing all zero coefficient 
+a = which(coef_lasso[-1] == 0)
+X = X[,-a]
+data = data.frame(y, X)
+
+```
+
+
+# Data partition into train and test data sets 
+```{r}
+set.seed(101)
+indexing <- createDataPartition(y = data$y, p = 0.75,list = FALSE)
+data_train = data[indexing,]
+data_test = data[-indexing,]
+```
+
+
+# K-nearest neighbor 
+```{r}
+knn_fit = train(y~., 
+                data = data_train, 
+                trControl = trainControl(method = 'repeatedcv', number = 10, repeats = 3), 
+                method = 'knn', 
+                tuneLength = 10
+                )
+knn_pred = predict(knn_fit, newdata = data_test)
+knn_RMSE = sqrt(mean((data_test$y - knn_pred)^2))
+
+```
+
+
+# Random Forest 
+```{r}
+rf_fit = train(y~., 
+               data = data_train, 
+               trControl = trainControl(method = 'repeatedcv', number = 10, repeats = 3), 
+               method = 'rf', 
+               tuneLength = 5
+               )
+rf_pred = predict(rf_fit, newdata = data_test)
+rf_RMSE = sqrt(mean((data_test$y - rf_pred)^2))
+
+```
+
+
+# Gradient Boost 
+```{r}
+boost.fit <- train(y ~ ., 
+                   data = data_train, 
+                   method = "gbm", 
+                   trControl = trainControl(method = 'repeatedcv', number = 10, repeats = 3), 
+                   verbose = FALSE,
+                   tuneLength = 10
+                   ) 
+boost_pred = predict(boost.fit, newdata = data_test)
+boost_RMSE = sqrt(mean((data_test$y - boost_pred)^2))
+
+```
+
+# Baysian Additive Regression Trees
+```{r}
+bart_fit = gbart(x.train = data_train[,-1], y.train = data_train$y, type = 'wbart')
+bart_pred = predict(bart_fit, newdata = data_test[,-1])
+
+pred.mean=apply(bart_pred,2,mean)
+bart_RMSE = sqrt(mean((data_test$y - pred.mean)^2))
+```
+
+
+```{r}
+RMSE = cbind(knn_RMSE, rf_RMSE, boost_RMSE, bart_RMSE)
+RMSE
+
+```
+
+```{r}
+X_cluster = full_data[,-1:-4]
+pca_out = prcomp(X_cluster, scale. = TRUE)
+data = pca_out$x[,1:2]
+
+fviz_nbclust(data, kmeans, method = "wss", k.max = 10) # 4 looks good 
+fviz_nbclust(data, kmeans, method = "silhouette") # recommendation: 6
+
+kmean_fit <- kmeans(data, centers = 2, nstart = 10) 
+fviz_cluster(kmean_fit, data = scale(X_cluster),
+             palette = c("#00AFBB","#2E9FDF"),
+             ggtheme = theme_minimal(),
+             main = "Partitioning Clustering Plot"
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

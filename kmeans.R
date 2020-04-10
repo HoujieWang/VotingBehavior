@@ -26,11 +26,15 @@ par(mfrow = c(2,2))
 plot(fit2)
 summary(fit2)
 
-pwer = -1.5
+pwer = -1
 X1_trsfom = bcnPower(X1, lambda = rep(pwer, 6), gamma = c(1, 1, 5, 6, 6, 4))
 y1_trsfom = bcnPower(y1, lambda = pwer, gamma = 0.5)
 fit1 = lm(y1_trsfom~X1_trsfom)
 summary(fit1)
+shapiro.test(residuals(fit1))
+
+
+
 cv_lasso = cv.glmnet(X1_trsfom, y1_trsfom)
 lasso_coef = coef(cv_lasso, s = "lambda.min")
 X1_trsfom = X1_trsfom[, as.vector(lasso_coef)[-1] != 0]
