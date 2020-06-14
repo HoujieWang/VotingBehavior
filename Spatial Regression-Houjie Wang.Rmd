@@ -1,0 +1,391 @@
+---
+title: "Spatial Regression"
+author: "Houjie Wang"
+date: "4/24/2020"
+output: pdf_document
+bibliography: a.bib
+---
+```{r, message=FALSE}
+library(igraph); library(spdep); library(spatialreg); library(car); library(glmnet); library(tseries); library(sp); library(lmtest)
+load("Data.RData"); load("locs.Rdata")
+rownames(Data) = locs$fips
+```
+# 1 Problem Identification
+We first fit the entire data with basic linear regression, which is expected to be flawed. 
+```{r}
+fit = lm(Data$y~., data = Data)
+# summary(fit)
+par(mfrow = c(2,2))
+plot(fit)[2]
+list("R_square" = 1-sum(residuals(fit)^2)/sum((Data$y-mean(Data$y))^2))
+shapiro.test(residuals(fit))
+bgtest(fit)
+ncvTest(fit)
+```
+Based on the regression plots and hypothesis testing, the assumption of linearity, autocorrelation and constant variance are all violated. Moreover, the model is also poor in explaning the variation in data. All above facts implies that this crude regression is invalid, prompting the necessity of a new model that takes more information into accounts. Given the spatial nature of our data, we decide to employ spatial regression to resolve the autocorrelation and heteroscedasticity incurred by its spatial structure. 
+
+# Spatial Regression
+Before we further apply a spatial model, it's safe to apply Moran's I test [@Moran] to justifiy the existence of spatial autocorrelation. Moran’s I statistic of takes the form described in equation:
+$$
+  I = \frac{n}{\sum_{i=1}^{n}\sum_{j=1}^{n}w_{ij}}\frac{\sum_{i=1}^{n}\sum_{j=1}^{n}w_{ij}(y_{i}-\bar{y})(y_{j}-\bar{y})}{\sum_{i=1}^{n}(y_{i}-\bar{y})^2}
+$$
+, where $n$ is the number of observations, $y$ is the response and $w_{ij}$ is the weight. In our scanerio, $w_{ij}$ is a binary number from a weight matrix $W$, indicating if any two counties $x_{i}$ and $x_{j}$ share a boundary. Therefore, in matrix notation, we can write Moran's I as follows: 
+$$I=\frac{n {Y^{*}}^{'} W Y^{*}}{s_{o}{Y^{*}}^{'}Y^{*}}$$, where $W$ is the $n\times n$ sparse matrix and $s_{o}=\sum_{i=1}^{n}\sum_{j=1}^{n}w_{ij}$.
+
+Note that Moran's $I$ has asymptotic characteristic, which follows a standard normal for a large observations. ($\frac{I-E(I)}{\sqrt{Var(I)}}\sim N(0,1)$) This allows us to compute the p value easily.  
+
+Then we implement it in R:
+```{r}
+# Generate the spatial structure
+rawData = read.table("county_adjacency.munged.txt", colClasses=c("character", "character"))
+G = graph.edgelist(as.matrix(rawData), directed=FALSE)
+G = simplify(G, remove.loops=TRUE);V(G)$name=as.numeric(V(G)$name) 
+subFIPSid = V(G)$name %in% locs$fips
+countyGraph = induced.subgraph(G, V(G)[subFIPSid]);
+graph0 = permute(countyGraph, order(V(countyGraph)$name)); ### this is the dense graph to begin with.
+nb.mat = as_adjacency_matrix(graph0)
+nb.mat = nb.mat[as.vector(sapply(as.character(locs$fips), function(x){which(x == rownames(nb.mat))})), ]
+nb.mat = nb.mat[, as.vector(sapply(as.character(locs$fips), function(x){which(x == colnames(nb.mat))}))]
+nb.w = mat2listw(nb.mat, style='B')
+
+# Moran's I test
+lm.morantest(fit, nb.w)
+```
+The result of Moran's I test shows the presence of spatial autocorrelaiton. Thus, it would be safe and effective to analyze the data with spatial regresson models 
+
+# Spatial Regression Models
+
+## Spatial Models
+Thera are three basic spatial models accounting for the spatial dependence. [@SpatialModel] They are spatial lag model, spatial cross-regressive model and spatial error model.    
+
+### Spatial Lag Model (SAR Model)
+The spatial lag model takes form as follows: 
+$$
+Y=\rho WY+X\beta+\epsilon.
+$$
+$WY$ is the spatial lagged dependent variable; $X$ are the explanatory variables and $\epsilon\sim N(0, \sigma_{e}^{2})$ Similar to OLS, we are interested in estimating for the parameters $\rho$ and $\beta$. We can also write a spatial lag model as follows:
+$$
+Y=(I-\rho W)^{-1}X\beta+(I-\rho W)^{-1}\epsilon
+$$
+However, since $WY$ much correlate with the residuals (i.e. $cov(WY, \epsilon)\neq 0$), then $WY$ is endogeneous and thus OLS would be inconsistent and biased due to the simultaneity bias)   
+
+### Spatial Cross-regressive Model
+Other than introducing an endogeneous variable, spatial cross-regressive intriduce a series of exogeneous spatial lag variables which are estimable direcly as OLS. It takes form as follows:
+$$
+Y=X\beta+WX\gamma+\epsilon.
+$$
+We can simply rewrite it as an ordinary OLS problem and easily estimate for the parameters: 
+$$
+Y=
+\left[\begin{array}{rrr} 
+X & WY\\
+\end{array}\right]
+\left[\begin{array}{rrr} 
+\beta\\ 
+\gamma
+\end{array}\right]
++\epsilon=\tilde{X}\tilde{\beta}+\epsilon 
+, \space \tilde{\beta}=(\tilde{X}^{'}\tilde{X})^{-1}\tilde{X}^{'}Y
+$$ 
+
+### Spatial Error Model
+Contrary to spatial lag model, spatial error model contains a spatial autoregressive error term, which take form as follows: 
+$$
+Y=X\beta+\epsilon, \epsilon=\lambda W\epsilon+u,
+$$
+where $\epsilon$ is a vector of spatially autocorrelated error terms and $u\sim N(0, \sigma_{u}^2)$. Similar to OLS, we are interested in estimating for the parameters $\lambda$ and $\beta$. 
+
+## Spatial Model Selection
+Larange multipler test for spatial autocorrelation distincts between spatial lag model and error model including their robust forms, which prompts a proper alternative for us to resolve spatial issues.
+```{r}
+lm.LMtests(fit, nb.w, test=c("LMerr","RLMerr","LMlag","RLMlag"))
+```
+Based on the results, note that both spatial error model and spatial lag model are significant in our case, (Their p-values are smaller than 0.05). So we would mainly focus on these two models. 
+
+### Spatial Lag Model 
+
+The significant results will be displayed in the next section for a concise purpose 
+```{r}
+fit2 = lagsarlm(Data$y~., data = Data, nb.w)
+```
+We obtain a very significant $\rho$ in this model (p is almost 0 by asymptotic t test), which means that the spatial coefficient $\rho$ significantly improves the model from OLS.
+Moreover, we can also see an reduction in AIC compated to OLS . LM test for residual autocorrelation returns us a strong evidence that spatial autocorrelation is resolved (LM test $p-value=0.61284$). These all indicate a stronger validity of the spatial lag model. 
+
+### Spatial Error Model
+```{r}
+fit3 = errorsarlm(Data$y~., data = Data, nb.w)
+```
+Similarly, we also obtain a strong evidence that the spatial parameter is functioning to enhance the model (p value for $\lambda$ is zero) and a smaller AIC from OLS. Note that Lm test for spatial autocorrelation is not available. 
+
+### Spatial Cross-regressive Model (SLX)
+```{r}
+fit4 = lmSLX(Data$y~., data = Data, nb.w)
+```
+
+## Summary
+```{r}
+fit_AIC = c(AIC(fit), AIC(fit2), AIC(fit3), AIC(fit4))
+R_sq = function(fit){
+  return(1 - sum((residuals(fit) - mean(residuals(fit)))^2)/sum((Data$y - mean(Data$y))^2))
+  }
+fit_R_sq = c(R_sq(fit), R_sq(fit2), R_sq(fit3), R_sq(fit4))
+fit_normality = c(shapiro.test(residuals(fit))$p.value, shapiro.test(residuals(fit2))$p.value, shapiro.test(residuals(fit3))$p.value, shapiro.test(residuals(fit4))$p.value) >= 0.05
+fit_auto = round(c(bgtest(fit)$p.value, 0.61284, NA, bgtest(fit4)$p.value), digits = 4)
+fit_table = cbind.data.frame("AIC" = fit_AIC, "R^2" = fit_R_sq, "Normal" = fit_normality, "auto" = fit_auto)
+rownames(fit_table) = c("lm", "lag", "err", "SLX")
+fit_table
+```
+Based on the table, we conclude that under the fact that normality is preserved, by comparing the AICs and $R^{2}$, we can see all the spatial regression models are more accurate in explaning the variation within the data, especially the spatial lag model. In addition to the fitting performance, from the p values of the fourth column, we can see that lag model and SLX model to some extent resolve the presence of spatial regression ($p-value > 0.05$). Notwithstanding the lack in error models, the significace in its spatial parameter $p-value_{\lambda}=0$ is enough to imply the improvement.
+To examine the heteroschedasticity of these models, due to a lack of a generic function for constant variance test compatiable to a variation of model object in R, we plot the fitted values verses standardized residuals.
+```{r}
+par(mfrow = c(2,2))
+plot(x = Data$y - residuals(fit),  y = (residuals(fit2)-mean(residuals(fit)))/sd(residuals(fit)), ylab = "std residuam", xlab = "fitted values", "main" = "RES plot of crude model")
+lines(x = seq(-2, 5, length.out = 1000), y = rep(0, 1000), col = "red")
+plot(x = Data$y - residuals(fit2),  y = (residuals(fit2)-mean(residuals(fit2)))/sd(residuals(fit2)), ylab = "std residuam", xlab = "fitted values", "main" = "RES plot of lag model")
+lines(x = seq(-2, 5, length.out = 1000), y = rep(0, 1000), col = "red")
+plot(x = Data$y - residuals(fit3),  y = (residuals(fit3)-mean(residuals(fit3)))/sd(residuals(fit3)), ylab = "std residuam", xlab = "fitted values", "main" = "RES plot of error model")
+lines(x = seq(-2, 5, length.out = 1000), y = rep(0, 1000), col = "red")
+plot(x = Data$y - residuals(fit4),  y = (residuals(fit3)-mean(residuals(fit4)))/sd(residuals(fit4)), ylab = "std residuam", xlab = "fitted values", "main" = "RES plot of SLX model")
+lines(x = seq(-2, 5, length.out = 1000), y = rep(0, 1000), col = "red")
+```
+Althrough not obvious, the points in spatial model plot are more spread out and more symmetrically concentrated with respect to the central red line. Thus it's reasonable to conclude that spatial models, to some extent stablize the variance of residuals. 
+Above all, spatial models, althrough not remarkably better, all out-performe the OLS in terms of the underlying assumptions of regression, significantly resolving the spatial dependence among the data. 
+
+# Spatial Prediction 
+
+In this section we employ spatial lag model to make prediction and calculate for RMSE so that we are allowed to compare the lag model with other machine learning techniques.
+```{r} 
+rmse = c()
+for (i in 1: 10){
+  tst_ind = sample(1: nrow(Data), 213, replace = F)
+  tst_data = Data[tst_ind,]; trn_data = Data[-tst_ind,]
+  
+  # Weight matrix for test data
+  rawData = read.table("county_adjacency.munged.txt", colClasses=c("character", "character"))
+  G = graph.edgelist(as.matrix(rawData), directed=FALSE)
+  G = simplify(G, remove.loops=TRUE);V(G)$name=as.numeric(V(G)$name) 
+  subFIPSid = V(G)$name %in% locs$fips[tst_ind]
+  countyGraph = induced.subgraph(G, V(G)[subFIPSid]);
+  graph0 = permute(countyGraph, order(V(countyGraph)$name)); ### this is the dense graph to begin with.
+  nb.mat_tst = as_adjacency_matrix(graph0)
+  nb.mat_tst = nb.mat_tst[as.vector(sapply(as.character(locs$fips[tst_ind]), function(x){which(x == rownames(nb.mat_tst))})), ]
+  nb.mat_tst = nb.mat_tst[, as.vector(sapply(as.character(locs$fips[tst_ind]), function(x){which(x == colnames(nb.mat_tst))}))]
+  ind_rm = -which(apply(nb.mat_tst, 1, function(x){sum(x) == 0}))
+  if (length(ind_rm) != 0){
+    nb.mat_tst = nb.mat_tst[ind_rm, ind_rm]
+    tst_data = tst_data[ind_rm, ]
+    nb.w_tst = mat2listw(nb.mat_tst)
+  } else {
+    nb.w_tst = mat2listw(nb.mat_tst)
+  }
+  rawData = read.table("county_adjacency.munged.txt", colClasses=c("character", "character"))
+  G = graph.edgelist(as.matrix(rawData), directed=FALSE)
+  G = simplify(G, remove.loops=TRUE);V(G)$name=as.numeric(V(G)$name) 
+  subFIPSid = V(G)$name %in% locs$fips[-tst_ind]
+  countyGraph = induced.subgraph(G, V(G)[subFIPSid]);
+  graph0 = permute(countyGraph, order(V(countyGraph)$name)); 
+  nb.mat_trn = as_adjacency_matrix(graph0)
+  nb.mat_trn = nb.mat_trn[as.vector(sapply(as.character(locs$fips[-tst_ind]), function(x){which(x == rownames(nb.mat_trn))})), ]
+  nb.mat_trn = nb.mat_trn[, as.vector(sapply(as.character(locs$fips[-tst_ind]), function(x){which(x == colnames(nb.mat_trn))}))]
+  ind_rm = -which(apply(nb.mat_trn, 1, function(x){sum(x) == 0}))
+  if (length(ind_rm) != 0){
+    nb.mat_trn = nb.mat_trn[ind_rm, ind_rm]
+    trn_data = trn_data[ind_rm, ]
+    nb.w_trn = mat2listw(nb.mat_trn)
+  } else {
+    nb.w_trn = mat2listw(nb.mat_trn)
+  }
+  fit = lagsarlm(trn_data$y~., data = trn_data, nb.w_trn)
+  rho = as.vector(coef(fit)[1]); beta = as.vector(coef(fit)[-1])
+  res = tst_data[, 1] - as.vector(solve(diag(1, nrow = nrow(nb.mat_tst)) - rho*nb.mat_tst) %*% as.matrix(cbind(rep(1, nrow(tst_data)), tst_data[, -1])) %*% beta)
+  rmse = c(rmse, sqrt(mean(res^2)))
+}
+RMSE = mean(rmse)
+list("RMSE" = RMSE)
+```
+We obtain the averaged RMSE of 10 repeated 25% cross-validation for spatial lag model.  
+
+## Power transformation of spatial weight matrix
+
+Instead of using the weight matrix with binary entries indicating the proximity of two counties, we could replace the binary entries with the some power of distance so we could introduce a shrinking effect based on the distance. We evaluate this method over 30 grid points from 0.1 to 3. For each grid point of power, similar to the previous case, we do 25% cross validation 10 times and calculate the RMSE.
+```{r}
+mean_rmse = c()
+for (t in seq(0.1, 3, length.out = 30)){
+  rmse = c()
+  mse = c()
+  for (i in 1: 10){
+    tst_ind = sample(1: nrow(Data), 213, replace = F)
+    tst_data = Data[tst_ind,]; trn_data = Data[-tst_ind,]
+    
+    # Weight matrix for test data
+    rawData = read.table("county_adjacency.munged.txt", colClasses=c("character", "character"))
+    G = graph.edgelist(as.matrix(rawData), directed=FALSE)
+    G = simplify(G, remove.loops=TRUE);V(G)$name=as.numeric(V(G)$name) 
+    subFIPSid = V(G)$name %in% locs$fips[tst_ind]
+    countyGraph = induced.subgraph(G, V(G)[subFIPSid]);
+    graph0 = permute(countyGraph, order(V(countyGraph)$name)); 
+    nb.mat_tst = as_adjacency_matrix(graph0)
+    nb.mat_tst = nb.mat_tst[as.vector(sapply(as.character(locs$fips[tst_ind]), function(x){which(x == rownames(nb.mat_tst))})), ]
+    nb.mat_tst = nb.mat_tst[, as.vector(sapply(as.character(locs$fips[tst_ind]), function(x){which(x == colnames(nb.mat_tst))}))]
+    ind_rm = -which(apply(nb.mat_tst, 1, function(x){sum(x) == 0}))
+    if (length(ind_rm) != 0){
+      nb.mat_tst = nb.mat_tst[ind_rm, ind_rm]
+      dist_mat = spDists(as.matrix(locs[locs$fips %in% rownames(nb.mat_tst), 1:2]))
+      diag(dist_mat) = 1; dist_mat = 1/dist_mat^t
+      nb.mat_tst = dist_mat
+      nb.mat_tst = nb.mat_tst*dist_mat
+      tst_data = tst_data[ind_rm, ]
+      nb.w_tst = mat2listw(nb.mat_tst)
+    } else {
+      dist_mat = spDists(as.matrix(locs[locs$fips %in% rownames(nb.mat_tst), 1:2]))
+      diag(dist_mat) = 1; dist_mat = 1/dist_mat^t
+      nb.mat_tst = dist_mat
+      nb.mat_tst = nb.mat_tst*dist_mat
+      nb.w_tst = mat2listw(nb.mat_tst)
+    }
+  
+    # Weight matrix for training data
+    rawData = read.table("county_adjacency.munged.txt", colClasses=c("character", "character"))
+    G = graph.edgelist(as.matrix(rawData), directed=FALSE)
+    G = simplify(G, remove.loops=TRUE);V(G)$name=as.numeric(V(G)$name) 
+    subFIPSid = V(G)$name %in% locs$fips[-tst_ind]
+    countyGraph = induced.subgraph(G, V(G)[subFIPSid]);
+    graph0 = permute(countyGraph, order(V(countyGraph)$name)); 
+    nb.mat_trn = as_adjacency_matrix(graph0)
+    nb.mat_trn = nb.mat_trn[as.vector(sapply(as.character(locs$fips[-tst_ind]), function(x){which(x == rownames(nb.mat_trn))})), ]
+    nb.mat_trn = nb.mat_trn[, as.vector(sapply(as.character(locs$fips[-tst_ind]), function(x){which(x == colnames(nb.mat_trn))}))]
+    ind_rm = -which(apply(nb.mat_trn, 1, function(x){sum(x) == 0}))
+    if (length(ind_rm) != 0){
+      nb.mat_trn = nb.mat_trn[ind_rm, ind_rm]
+      dist_mat = spDists(as.matrix(locs[locs$fips %in% rownames(nb.mat_trn), 1:2]))
+      diag(dist_mat) = 1; dist_mat = 1/dist_mat^t
+      nb.mat_trn = dist_mat
+      nb.mat_trn = nb.mat_trn*dist_mat
+      trn_data = trn_data[ind_rm, ]
+      nb.w_trn = mat2listw(nb.mat_trn)
+    } else {
+      dist_mat = spDists(as.matrix(locs[locs$fips %in% rownames(nb.mat_trn), 1:2]))
+      diag(dist_mat) = 1; dist_mat = 1/dist_mat^t
+      nb.mat_trn = dist_mat
+      nb.mat_trn = nb.mat_trn*dist_mat
+      nb.w_trn = mat2listw(nb.mat_trn)
+    }
+    fit = lagsarlm(trn_data$y~., data = trn_data, nb.w_trn)
+    rho = as.vector(coef(fit)[1]); beta = as.vector(coef(fit)[-1])
+    res = tst_data[, 1] - as.vector(solve(diag(1, nrow = nrow(nb.mat_tst)) - rho*nb.mat_tst) %*% as.matrix(cbind(rep(1, nrow(tst_data)), tst_data[, -1])) %*% beta)
+    rmse = c(mse, sqrt(mean(res^2)))
+  }
+  mean_rmse = c(mean_rmse, mean(rmse))
+}
+mean_rmse
+```
+Here is a plot comparing the power transformation weight to radical weight.
+```{r}
+plot(x = seq(0.1, 1.5, length.out = 30), y = mean_rmse, xlab = "power", ylab = "RMSE", "main" = "RMSE over grid points", ylim = c(0.5, 1))
+lines(x = seq(0.1, 1.5, length.out = 30), y = rep(RMSE, 30), col = "green")
+lines(x = seq(0.1, 1.5, length.out = 30), y = rep(mean(mean_rmse), 30), lty = 2, col = "red")
+legend(0.8,  0.6, legend = c("power weight mean","radical weight mean"), lty = c(2, 1), col = c("red", "green"))
+
+```
+In this plot, the RMSE of power weight are single points while the RMSE of radical weight is the solid green line. There appears to be a periodic fluctuating tendency of the RMSE of power transformation with respect to the radical RMSE. The dotted red line represents the mean of the RMSE of each power in the grid points. We can see that the power weight RMSE mean is close and even higher than that of radical. I think these two weights are roughly the same and for a computational ease, it's better to use radical weight.
+
+# Spatial SLX and Lasso 
+Note that so far, all of our analysis were made based on the data pre-selected by lasso over the entire data. Lasso selects some features so as to reduce prediciton error but does not account for spatial dependence, while spatial regression accounts for the latter only. We are wondering if we could perform spatial regression and model selection together and how would this method compare to direct application of spatial models. In this section, we will talk about this in a shallow level, comparing direct application of SLX model and SLX combined with lasso. The reson why we use SLX model is that SLX model could be direcly formulated into a OLS problem, which appears to be a good fit for an attempt.
+```{r}
+sang_election = read.csv(file = "election_couty_cleaned.csv")
+load(file = "full_data.Rdata")
+
+############################### Data Creation ###############################
+
+full_data = full_data[-632,]
+sang_election= sang_election[-623,]
+ind = intersect(sang_election$fips, full_data$Id2)
+y_ind = sapply(ind, function(x){which(x == sang_election$fips)})
+X_ind = sapply(ind, function(x){which(x == full_data$Id2)})
+y_ind = y_ind[order(as.integer(names(y_ind)))]
+sang_election = sang_election[y_ind, ]
+X_ind = sort(X_ind)
+full_data = full_data[X_ind, ]
+logOdds_dem2016 = log(sang_election$pct_dem_16/(1-sang_election$pct_dem_16))
+logOdds_dem2012 = log(sang_election$pct_dem_12/(1-sang_election$pct_dem_12))
+y = logOdds_dem2016 - logOdds_dem2012
+Data = cbind(y, full_data[, -c(1: 4)])
+X = as.matrix(Data[, -1])
+locs = sang_election[, 1: 5]
+
+############################### Cross Validation ###############################
+k = 10
+Rmse = matrix(0, nrow = 2, ncol = k)
+for (i in 1: k){
+  tst_ind = sample(1: nrow(Data), 213, replace = F)
+  tst_data = Data[tst_ind,]; trn_data = Data[-tst_ind,]
+  # Weight matrix for test data
+  rawData = read.table("county_adjacency.munged.txt", colClasses=c("character", "character"))
+  G = graph.edgelist(as.matrix(rawData), directed=FALSE)
+  G = simplify(G, remove.loops=TRUE);V(G)$name=as.numeric(V(G)$name) 
+  subFIPSid = V(G)$name %in% locs$fips[tst_ind]
+  countyGraph = induced.subgraph(G, V(G)[subFIPSid]);
+  graph0 = permute(countyGraph, order(V(countyGraph)$name)); ### this is the dense graph to begin with.
+  nb.mat_tst = as_adjacency_matrix(graph0)
+  nb.mat_tst = nb.mat_tst[as.vector(sapply(as.character(locs$fips[tst_ind]), function(x){which(x == rownames(nb.mat_tst))})), ]
+  nb.mat_tst = nb.mat_tst[, as.vector(sapply(as.character(locs$fips[tst_ind]), function(x){which(x == colnames(nb.mat_tst))}))]
+  ind_rm = -which(apply(nb.mat_tst, 1, function(x){sum(x) == 0}))
+  if (length(ind_rm) != 0){
+    nb.mat_tst = nb.mat_tst[ind_rm, ind_rm]
+    tst_data = tst_data[ind_rm, ]
+    nb.w_tst = mat2listw(nb.mat_tst)
+  } else {
+    nb.w_tst = mat2listw(nb.mat_tst)
+  }
+  rawData = read.table("county_adjacency.munged.txt", colClasses=c("character", "character"))
+  G = graph.edgelist(as.matrix(rawData), directed=FALSE)
+  G = simplify(G, remove.loops=TRUE);V(G)$name=as.numeric(V(G)$name) 
+  subFIPSid = V(G)$name %in% locs$fips[-tst_ind]
+  countyGraph = induced.subgraph(G, V(G)[subFIPSid]);
+  graph0 = permute(countyGraph, order(V(countyGraph)$name)); 
+  nb.mat_trn = as_adjacency_matrix(graph0)
+  nb.mat_trn = nb.mat_trn[as.vector(sapply(as.character(locs$fips[-tst_ind]), function(x){which(x == rownames(nb.mat_trn))})), ]
+  nb.mat_trn = nb.mat_trn[, as.vector(sapply(as.character(locs$fips[-tst_ind]), function(x){which(x == colnames(nb.mat_trn))}))]
+  ind_rm = -which(apply(nb.mat_trn, 1, function(x){sum(x) == 0}))
+  if (length(ind_rm) != 0){
+    nb.mat_trn = nb.mat_trn[ind_rm, ind_rm]
+    trn_data = trn_data[ind_rm, ]
+    nb.w_trn = mat2listw(nb.mat_trn)
+  } else {
+    nb.w_trn = mat2listw(nb.mat_trn)
+  }
+  
+  X = as.matrix(trn_data[, -1]); y = trn_data[, 1]
+  X_lag = nb.mat_trn %*% X
+  colnames(X_lag) = paste("Lag", colnames(X_lag))
+  X_tilda = as.matrix(cbind(X, X_lag))
+  fit1 = cv.glmnet(x = X_tilda, y = y, family = "gaussian")
+  X_tst = as.matrix(tst_data[, -1])
+  X_lag_tst = nb.mat_tst %*% X_tst
+  X_tilda_tst = as.matrix(cbind(X_tst, X_lag_tst))
+  residual1 = tst_data[, 1] - predict(fit1, X_tilda_tst)
+  Rmse[1, i]= sqrt(mean(residual1^2))
+  
+  fit2 = lm(y ~ X_tilda)
+  X_tilda_tst = X_tilda_tst[, which(!is.na(as.vector(coef(fit2)[-1])))]
+  beta = coef(fit2)[-1][which(!is.na(as.vector(coef(fit2)[-1])))]
+  residual2 = tst_data[, 1] - X_tilda_tst %*% beta
+  Rmse[2, i]= sqrt(mean(residual2^2))
+}
+rownames(Rmse) = c("SLX lasso", "SLX")
+as.data.frame(Rmse)
+plot(x = 1: nrow(X_tilda_tst), y = residual1, col = "red", ylim = c(-1, 1), main = "residual plot of SLX lasso and SLX")
+points(x = 1: nrow(X_tilda_tst), y = residual2, col = "green")
+lines(x = 1: nrow(X_tilda_tst), y = rep(mean(residual1), nrow(X_tilda_tst)) , lty = 1)
+lines(x = 1: nrow(X_tilda_tst), y = rep(mean(residual2), nrow(X_tilda_tst)), lty = 2)
+legend(x = 70, y = 0.9, legend = c("SLX lLasso RES Mean","SLX RES Mean"), lty = c(1, 2))
+```
+Based on the comparison between the MSE of SLX lasso and SLX, we can see that applying SLX lasso largly reduce the MSE. Moreover, we can see from the plot that the residuals of SLX lasso are scatter around zero (solid line in the plot) while SLX appears to be biased. Therefore, in this case, combining SLX with lasso indeed increases the prediction accuracy. 
+In the future, 
+
+# Reference
+
+
+ 
+
+
